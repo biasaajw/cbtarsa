@@ -128,7 +128,6 @@ function ExamPage() {
   /* ---------- Pengamanan browser ---------- */
   useEffect(() => {
     if (!auth || !attempt) return
-    // Halaman dibuka tanpa layar penuh (mis. setelah muat ulang) = keluar dari mode aman.
     if (!isFullscreen()) {
       lockSession('muat-ulang', 'halaman dimuat ulang atau dibuka di luar layar penuh')
       return
@@ -222,8 +221,58 @@ function ExamPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auth?.username, !!attempt, lockSession, warn])
 
-  // Kamera wajib aktif.
+  // Kamera wajib aktif & deteksi penutupan fisik kamera (gelap total)
   const camWarned = useRef(false)
+  const darkFrameCountRef = useRef(0)
+
+  useEffect(() => {
+    if (!auth || !attempt || locked || control.paused) return
+
+    const interval = setInterval(() => {
+      const video = cam.videoRef.current
+      if (!video || video.readyState !== 4 || video.paused || video.ended) return
+
+      const canvas = document.createElement('canvas')
+      canvas.width = 80
+      canvas.height = 60
+      const ctx = canvas.getContext('2d', { willReadFrequently: true })
+      if (!ctx) return
+
+      try {
+        ctx.drawImage(video, 0, 0, 80, 60)
+        const imgData = ctx.getImageData(0, 0, 80, 60)
+        const data = imgData.data
+        let totalBrightness = 0
+        const totalPixels = data.length / 4
+
+        for (let i = 0; i < data.length; i += 4) {
+          const r = data[i]
+          const g = data[i + 1]
+          const b = data[i + 2]
+          totalBrightness += (0.299 * r + 0.587 * g + 0.114 * b)
+        }
+
+        const avg = totalBrightness / totalPixels
+        // Jika kecerahan rata-rata di bawah 12 (gelap gulita/tertutup benda/stiker)
+        if (avg < 12) {
+          darkFrameCountRef.current += 1
+          if (darkFrameCountRef.current >= 4) { // Terdeteksi tertutup selama ~2 detik
+            darkFrameCountRef.current = 0
+            playAlarm()
+            warn('Kamera terdeteksi tertutup secara fisik! Harap buka penutup kamera.', 'kamera-mati')
+            recordViolation(auth.username, 'kamera-mati', 'Kamera ditutup secara fisik (gelap total)', false)
+          }
+        } else {
+          darkFrameCountRef.current = 0
+        }
+      } catch {
+        // Abaikan error cross-origin jika terjadi
+      }
+    }, 500)
+
+    return () => clearInterval(interval)
+  }, [auth, attempt, locked, control.paused, cam.videoRef, warn])
+
   useEffect(() => {
     if ((cam.state === 'ended' || cam.state === 'denied') && !camWarned.current && auth) {
       camWarned.current = true
