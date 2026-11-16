@@ -221,9 +221,9 @@ function ExamPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auth?.username, !!attempt, lockSession, warn])
 
-  // Kamera wajib aktif & deteksi penutupan fisik kamera (gelap total)
+  // Kamera wajib aktif & deteksi penutupan fisik (Gelap total ATAU Permukaan datar/tertutup tidak rapat)
   const camWarned = useRef(false)
-  const darkFrameCountRef = useRef(0)
+  const blockCountRef = useRef(0)
 
   useEffect(() => {
     if (!auth || !attempt || locked || control.paused) return
@@ -242,31 +242,45 @@ function ExamPage() {
         ctx.drawImage(video, 0, 0, 80, 60)
         const imgData = ctx.getImageData(0, 0, 80, 60)
         const data = imgData.data
+        
         let totalBrightness = 0
         const totalPixels = data.length / 4
+        const brightnessValues: number[] = []
 
         for (let i = 0; i < data.length; i += 4) {
           const r = data[i]
           const g = data[i + 1]
           const b = data[i + 2]
-          totalBrightness += (0.299 * r + 0.587 * g + 0.114 * b)
+          const brightness = 0.299 * r + 0.587 * g + 0.114 * b
+          totalBrightness += brightness
+          brightnessValues.push(brightness)
         }
 
         const avg = totalBrightness / totalPixels
-        // Jika kecerahan rata-rata di bawah 12 (gelap gulita/tertutup benda/stiker)
-        if (avg < 12) {
-          darkFrameCountRef.current += 1
-          if (darkFrameCountRef.current >= 4) { // Terdeteksi tertutup selama ~2 detik
-            darkFrameCountRef.current = 0
+
+        // Hitung Variansi (Variance) untuk mendeteksi permukaan datar/monoton (ditutup jari/kertas longgar)
+        let varianceSum = 0
+        for (let i = 0; i < brightnessValues.length; i++) {
+          varianceSum += Math.pow(brightnessValues[i] - avg, 2)
+        }
+        const variance = varianceSum / totalPixels
+
+        // Kriteria Pelanggaran Tertutup Fisik:
+        // 1. avg < 12 (Gelap gulita total)
+        // 2. variance < 20 (Permukaan terlalu datar/monoton meskipun ada sedikit cahaya lolos)
+        if (avg < 12 || variance < 20) {
+          blockCountRef.current += 1
+          if (blockCountRef.current >= 4) { // Terdeteksi selama ~2 detik berturut-turut
+            blockCountRef.current = 0
             playAlarm()
-            warn('Kamera terdeteksi tertutup secara fisik! Harap buka penutup kamera.', 'kamera-mati')
-            recordViolation(auth.username, 'kamera-mati', 'Kamera ditutup secara fisik (gelap total)', false)
+            warn('Kamera terdeteksi tertutup atau terhalang! Harap singkirkan penghalang.', 'kamera-mati')
+            recordViolation(auth.username, 'kamera-mati', `Kamera tertutup fisik (Avg: ${Math.round(avg)}, Var: ${Math.round(variance)})`, false)
           }
         } else {
-          darkFrameCountRef.current = 0
+          blockCountRef.current = 0
         }
       } catch {
-        // Abaikan error cross-origin jika terjadi
+        // Abaikan error cross-origin
       }
     }, 500)
 
