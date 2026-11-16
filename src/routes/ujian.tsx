@@ -221,9 +221,10 @@ function ExamPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auth?.username, !!attempt, lockSession, warn])
 
-  // Kamera wajib aktif & deteksi penutupan fisik (Gelap total ATAU Permukaan datar/tertutup tidak rapat)
+  /* ---------- Anti-Cheat Kamera Diperketat (Cahaya Redup, Jarak Jauh, Tembok, & Virtual Cam) ---------- */
   const camWarned = useRef(false)
-  const blockCountRef = useRef(0)
+  const violationCountRef = useRef(0)
+  const prevFrameRef = useRef<number[] | null>(null)
 
   useEffect(() => {
     if (!auth || !attempt || locked || control.paused) return
@@ -245,7 +246,7 @@ function ExamPage() {
         
         let totalBrightness = 0
         const totalPixels = data.length / 4
-        const brightnessValues: number[] = []
+        const currentGrayscale: number[] = []
 
         for (let i = 0; i < data.length; i += 4) {
           const r = data[i]
@@ -253,31 +254,49 @@ function ExamPage() {
           const b = data[i + 2]
           const brightness = 0.299 * r + 0.587 * g + 0.114 * b
           totalBrightness += brightness
-          brightnessValues.push(brightness)
+          currentGrayscale.push(brightness)
         }
 
         const avg = totalBrightness / totalPixels
 
-        // Hitung Variansi (Variance) untuk mendeteksi permukaan datar/monoton (ditutup jari/kertas longgar)
+        // 1. Cek Variansi Tekstur (Diperketat ke < 50 untuk mendeteksi tembok, langit-langit, atau penutup jarak jauh)
         let varianceSum = 0
-        for (let i = 0; i < brightnessValues.length; i++) {
-          varianceSum += Math.pow(brightnessValues[i] - avg, 2)
+        for (let i = 0; i < currentGrayscale.length; i++) {
+          varianceSum += Math.pow(currentGrayscale[i] - avg, 2)
         }
         const variance = varianceSum / totalPixels
 
-        // Kriteria Pelanggaran Tertutup Fisik:
-        // 1. avg < 12 (Gelap gulita total)
-        // 2. variance < 20 (Permukaan terlalu datar/monoton meskipun ada sedikit cahaya lolos)
-        if (avg < 12 || variance < 20) {
-          blockCountRef.current += 1
-          if (blockCountRef.current >= 4) { // Terdeteksi selama ~2 detik berturut-turut
-            blockCountRef.current = 0
+        // 2. Cek Perbedaan Antar Frame (Mendeteksi gambar beku / foto / virtual cam)
+        let frameDiff = 0
+        if (prevFrameRef.current) {
+          let diffSum = 0
+          for (let i = 0; i < currentGrayscale.length; i++) {
+            diffSum += Math.abs(currentGrayscale[i] - prevFrameRef.current[i])
+          }
+          frameDiff = diffSum / totalPixels
+        }
+        prevFrameRef.current = currentGrayscale
+
+        const isStaticImage = prevFrameRef.current !== null && frameDiff < 0.3
+
+        // KRITERIA PELANGGARAN DIPERKETAT:
+        // - avg < 40 (Mendeteksi ruangan gelap, lampu mati, atau posisi terlalu jauh)
+        // - variance < 50 (Mendeteksi permukaan datar seperti tembok/langit-langit yang diarahkan dari jauh)
+        // - isStaticImage (Mendeteksi foto/virtual camera)
+        if (avg < 40 || variance < 50 || isStaticImage) {
+          violationCountRef.current += 1
+          if (violationCountRef.current >= 4) { // Terdeteksi konsisten selama ~2 detik
+            violationCountRef.current = 0
             playAlarm()
-            warn('Kamera terdeteksi tertutup atau terhalang! Harap singkirkan penghalang.', 'kamera-mati')
-            recordViolation(auth.username, 'kamera-mati', `Kamera tertutup fisik (Avg: ${Math.round(avg)}, Var: ${Math.round(variance)})`, false)
+            const reasonDesc = isStaticImage 
+              ? 'Kamera terdeteksi statis / menggunakan gambar palsu.' 
+              : 'Kamera terdeteksi tertutup, terlalu gelap, atau diarahkan menjauh dari wajah.'
+            
+            warn(reasonDesc, 'kamera-mati')
+            recordViolation(auth.username, 'kamera-mati', `${reasonDesc} (Avg: ${Math.round(avg)}, Var: ${Math.round(variance)})`, false)
           }
         } else {
-          blockCountRef.current = 0
+          violationCountRef.current = 0
         }
       } catch {
         // Abaikan error cross-origin
